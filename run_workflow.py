@@ -26,14 +26,14 @@ Steps:
   1) Point rate_to_json, rate_card_extraction, and rate_creation at Drive folders.
   2) Run rate_creation.main() (interactive prompts).
   3) Rename *_rate_matrix.xlsx / .json to match the previous-rate workbook stem with v.N bumped (v.1 -> v.2, etc.).
-  4) Move processed tariff xlsx files from input/ to arhive/.
+  4) Move processed tariff xlsx files from input/ to archive/.
 
 Data layout (override with RMT_BRIDGESTONE_ROOT):
   .../input
   .../output
   .../previous_rate
   .../processing
-  .../arhive   (folder name as on your Drive)
+  .../archive   (folder name as on your Drive)
 """
 
 from __future__ import annotations
@@ -153,7 +153,7 @@ def post_process_after_rate_creation(root: Path) -> None:
         _rename_pair(proc_dir, old_base, new_base)
         print(f"Renamed matrix files to stem: {new_base}")
 
-    archive_dir = root / "arhive"
+    archive_dir = root / "archive"
     archive_dir.mkdir(parents=True, exist_ok=True)
     for p in meta.get("tariff_input_files") or []:
         src = Path(p)
@@ -167,7 +167,7 @@ def post_process_after_rate_creation(root: Path) -> None:
 
 def main() -> None:
     root = _resolve_root()
-    for sub in ("input", "output", "previous_rate", "processing", "arhive"):
+    for sub in ("input", "output", "previous_rate", "processing", "archive"):
         (root / sub).mkdir(parents=True, exist_ok=True)
 
     _apply_data_paths(root)
