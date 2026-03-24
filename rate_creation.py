@@ -389,6 +389,29 @@ def _less_than_display_int_from_upper(ub: float) -> int:
     return int(math.ceil(ub))
 
 
+def _synthetic_geq_int_from_last_lt_upper(ub: float) -> int:
+    """
+    Integer **N** for the synthetic ``>=N`` FLAT column after the last ``<`` p/unit band (and for
+    ``rate × N / divisor``). **Does not** replace :func:`_less_than_display_int_from_upper`, which
+    stays used only for ``<…`` display labels.
+
+    EU tariffs often end a band at ``12500,99`` (parsed ``12500.99``). Using :func:`math.ceil` would
+    yield ``>=12501``, while a manually added bracket is typically ``>=12500``. When the integer part
+    is a **round hundred** and the fractional part is **~0.99**, use ``N = int(ub)`` so the
+    synthetic column matches that manual ``>=12500`` naming. Other bounds (e.g. ``12499,99`` →
+    ``ceil`` → ``12500``) keep the previous behaviour.
+    """
+    iu = int(ub)
+    frac = ub - iu
+    if (
+        ub != float(iu)
+        and iu % 100 == 0
+        and frac >= 0.99 - 1e-6
+    ):
+        return iu
+    return _less_than_display_int_from_upper(ub)
+
+
 def _hyphen_range_upper_float(label: str) -> float | None:
     """
     Upper bound (second number) of ``a-b`` weight ranges. ``(ColumnN)`` is stripped by
@@ -835,7 +858,7 @@ def add_synthetic_geq_flat_after_last_p_unit(
     # e.g. 8251-10000 next to >10000: <10000.001 / >=10000.001 from '>' only — not >=10001 from range
     if _hyphen_range_paired_with_matching_gt_column(src, rbc):
         return df, rbc, meas
-    n_mult = _less_than_display_int_from_upper(ub)
+    n_mult = _synthetic_geq_int_from_last_lt_upper(ub)
     new_name = f">={n_mult}"
     if new_name in rbc:
         return df, rbc, meas
