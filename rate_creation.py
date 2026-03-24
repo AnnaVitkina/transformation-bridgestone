@@ -2998,6 +2998,19 @@ def main():
     print(f"\nJSON (same data + metadata):\n  {json_path}")
     print(f"Copy for processing folder:\n  {PROCESSING_DIR / json_path.name}")
 
+    # For Colab / run_workflow: rename outputs and archive inputs after the run.
+    try:
+        wf_meta = {
+            "prev_rate_file": str(prev_path.resolve()),
+            "prev_rate_stem": prev_path.stem,
+            "output_matrix_basename": out_path.name,
+            "tariff_input_files": [str(p.resolve()) for p, _ in pairs],
+        }
+        with open(PROCESSING_DIR / "last_run_workflow.json", "w", encoding="utf-8") as f:
+            json.dump(wf_meta, f, indent=2, ensure_ascii=False)
+    except Exception:
+        pass
+
 
 if __name__ == "__main__":
     main()
