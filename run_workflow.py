@@ -1,6 +1,10 @@
 """
 Google Colab / Drive workflow entrypoint.
 
+Why ``ModuleNotFoundError: rate_to_json``: with ``exec(open(...).read())``, Python does not add
+the repo folder to ``sys.path``. This script prepends it automatically; if the repo is not at
+``/content/transformation-bridgestone``, set ``TRANSFORMATION_BRIDGESTONE_REPO`` before running.
+
 Usage (after mounting Drive and cloning the repo under /content/transformation-bridgestone):
 
   import os
@@ -34,12 +38,33 @@ Data layout (override with RMT_BRIDGESTONE_ROOT):
 
 from __future__ import annotations
 
-import json
 import os
+import sys
+from pathlib import Path
+
+
+def _ensure_repo_on_sys_path() -> None:
+    """Colab ``exec(open(...).read())`` does not put the repo on ``sys.path``; sibling imports fail."""
+    try:
+        root = Path(__file__).resolve().parent
+    except NameError:
+        root = Path(
+            os.environ.get(
+                "TRANSFORMATION_BRIDGESTONE_REPO",
+                "/content/transformation-bridgestone",
+            )
+        ).resolve()
+    s = str(root)
+    if s not in sys.path:
+        sys.path.insert(0, s)
+
+
+_ensure_repo_on_sys_path()
+
+import json
 import re
 import shutil
 from datetime import datetime
-from pathlib import Path
 
 DEFAULT_ROOT = (
     "/content/drive/Shareddrives/FA Ops Europe: Rate Maintenance Team "
