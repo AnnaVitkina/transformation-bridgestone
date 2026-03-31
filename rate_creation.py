@@ -1298,6 +1298,45 @@ _EXTRA_PATTERN_FILL_KEYS = (
     "Area Code",
 )
 
+# Only fill these from tariff / Zip 2 if the key is non-empty on the extracted pattern (before enrichment).
+_CITY_KEYS_FOR_TARIFF_FILL = frozenset({"Origin City", "Destination City"})
+
+
+def _city_keys_declared_in_rate_card(pattern: dict[str, str]) -> frozenset[str]:
+    """
+    City keys that are **populated** on the extracted rate-card pattern (before enrichment).
+
+    Each pattern dict includes every *stable* column as a key, so ``Origin City`` and
+    ``Destination City`` can both be present with ``""``. Only keys with a non-empty value
+    count as declared for that lane; the other side must stay blank (no enrichment/tariff fill).
+    """
+    out: set[str] = set()
+    for k in _CITY_KEYS_FOR_TARIFF_FILL:
+        if k not in pattern:
+            continue
+        if str(pattern.get(k, "") or "").strip():
+            out.add(k)
+    return frozenset(out)
+
+
+def _strip_undeclared_city_keys(
+    expanded: dict[str, str],
+    city_keys_from_rate_card: frozenset[str] | None,
+) -> dict[str, str]:
+    """
+    Clear Origin/Destination City when not on the **extracted** pattern (before enrichment).
+
+    :func:`_enrich_pattern_from_rates_table` may add constant cities from the rate-card table;
+    those would otherwise appear in the matrix even when tariff fill is gated off.
+    """
+    if city_keys_from_rate_card is None:
+        return expanded
+    out = dict(expanded)
+    for k in _CITY_KEYS_FOR_TARIFF_FILL:
+        if k not in city_keys_from_rate_card:
+            out[k] = ""
+    return out
+
 
 def _column_sort_key(name: str):
     m = re.match(r"^Column(\d+)$", str(name))
@@ -1976,6 +2015,7 @@ def _fill_pattern_gaps(
     *,
     lane_role: str,
     changing_keys: list[str] | None = None,
+    city_keys_from_rate_card: frozenset[str] | None = None,
 ) -> dict[str, str]:
     """
     Fill empty pattern fields from tariff columns. lane_role is 'origin' or 'return'.
@@ -1985,6 +2025,10 @@ def _fill_pattern_gaps(
     (outbound → destination postal first; return → origin postal first). Only when postals are not
     among changing keys do we use the legacy behaviour: Zip 2 → empty **Destination City** (origin)
     or **Origin City** (return).
+
+    If *city_keys_from_rate_card* is set, **Origin City** / **Destination City** are filled from
+    tariff or Zip 2 only when that key was present on the extracted rate-card pattern (before
+    enrichment). Missing keys stay empty so outbound/return patterns stay one-sided.
 
     The Zip 2 column is still omitted from the wide tariff part (see _zip_lane_column_keys).
     """
@@ -2003,6 +2047,12 @@ def _fill_pattern_gaps(
         zip_cks = [ck for ck, lab in col_labels.items() if _label_is_zip2_lane(_label_base_for_match(lab))]
         _debug_line(f"Columns detected as Zip 2 lane: {zip_cks}", 1)
     for pk in list(out.keys()):
+        if (
+            city_keys_from_rate_card is not None
+            and pk in _CITY_KEYS_FOR_TARIFF_FILL
+            and pk not in city_keys_from_rate_card
+        ):
+            continue
         if str(out.get(pk) or "").strip():
             continue
         for ck, label in col_labels.items():
@@ -2045,6 +2095,12 @@ def _fill_pattern_gaps(
         li = 0
         for pk in changing_keys:
             if not pk or pk not in out:
+                continue
+            if (
+                city_keys_from_rate_card is not None
+                and pk in _CITY_KEYS_FOR_TARIFF_FILL
+                and pk not in city_keys_from_rate_card
+            ):
                 continue
             if str(out.get(pk) or "").strip():
                 continue
@@ -2096,9 +2152,11 @@ def _fill_pattern_gaps(
                             break
             continue
         if lane_role == "origin" and not str(out.get("Destination City") or "").strip():
-            out["Destination City"] = vs
+            if city_keys_from_rate_card is None or "Destination City" in city_keys_from_rate_card:
+                out["Destination City"] = vs
         elif lane_role == "return" and not str(out.get("Origin City") or "").strip():
-            out["Origin City"] = vs
+            if city_keys_from_rate_card is None or "Origin City" in city_keys_from_rate_card:
+                out["Origin City"] = vs
     if _DEBUG:
         _debug_line(
             "Result: "
@@ -2135,6 +2193,96 @@ def _all_pattern_output_keys(pattern_key_order: list[str]) -> list[str]:
     return out
 
 
+_EXCEL_OUTPUT_INTERNAL_DROP = frozenset(
+    {"_pattern_role", "_pattern_number", "_pattern_index", "_tariff_table_block"}
+)
+
+
+def _rate_card_lane_column_order(rates_table: list) -> list[str]:
+    """Column order for the lane block as in the previous-rate workbook (rates table row keys)."""
+    if not rates_table or not isinstance(rates_table[0], dict):
+        return []
+    return list(rates_table[0].keys())
+
+
+def _excel_shipment_column_prefix(
+    df: pd.DataFrame,
+    rates_table: list,
+    key_order: list[str],
+) -> list[str]:
+    """Shipment columns: match previous rate card order and presence; omit internal keys."""
+    lane = _rate_card_lane_column_order(rates_table)
+    if lane:
+        return [c for c in lane if c in df.columns and c not in _EXCEL_OUTPUT_INTERNAL_DROP]
+    return [
+        c
+        for c in _all_pattern_output_keys(key_order)
+        if c in df.columns and c not in _EXCEL_OUTPUT_INTERNAL_DROP
+    ]
+
+
+def _is_generic_excel_sheet_tab_name(name: str) -> bool:
+    """True for default tab names like Sheet1, Sheet 2 (not real business sheet titles)."""
+    s = (name or "").strip()
+    if not s:
+        return True
+    return bool(re.match(r"^sheet\s*\d+\s*$", s, re.I))
+
+
+def _rate_card_has_tariff_sheet_column(rates_table: list) -> bool:
+    if not rates_table or not isinstance(rates_table[0], dict):
+        return False
+    for k in rates_table[0].keys():
+        if str(k).strip().lower() == "tariff sheet":
+            return True
+    return False
+
+
+def _find_tariff_sheet_dataframe_column(df: pd.DataFrame) -> str | None:
+    for c in df.columns:
+        if str(c).strip().lower() == "tariff sheet":
+            return str(c)
+    return None
+
+
+def _chosen_tariff_sheet_display_value(pairs: list[tuple[Path, str]]) -> str | None:
+    """Sheet name(s) to show when all chosen tabs have non-generic names; else None."""
+    if not pairs:
+        return None
+    names = [sn for _, sn in pairs]
+    if any(_is_generic_excel_sheet_tab_name(n) for n in names):
+        return None
+    if len(names) == 1:
+        return names[0]
+    out: list[str] = []
+    for n in names:
+        if n not in out:
+            out.append(n)
+    return " + ".join(out)
+
+
+def _apply_chosen_tariff_sheet_to_matrix(
+    df: pd.DataFrame,
+    rates_table: list,
+    pairs: list[tuple[Path, str]],
+) -> pd.DataFrame:
+    """
+    If the previous rate card has a **Tariff sheet** lane column and the user picked non-generic
+    Excel tab name(s), set every row in that column to the chosen sheet name(s).
+    """
+    if df.empty or not _rate_card_has_tariff_sheet_column(rates_table):
+        return df
+    col = _find_tariff_sheet_dataframe_column(df)
+    if not col:
+        return df
+    val = _chosen_tariff_sheet_display_value(pairs)
+    if val is None:
+        return df
+    out = df.copy()
+    out[col] = val
+    return out
+
+
 def _build_matrix_rows(
     pattern_key_order: list[str],
     *,
@@ -2148,15 +2296,24 @@ def _build_matrix_rows(
     flat_zero_pattern: dict[str, str] | None = None,
     flat_zero_pattern_idx: int | None = None,
     flat_zero_base: str | None = None,
+    origin_city_keys_from_rate_card: frozenset[str] | None = None,
+    return_city_keys_from_rate_card: frozenset[str] | None = None,
+    flat_zero_city_keys_from_rate_card: frozenset[str] | None = None,
 ) -> list[dict]:
     """
     One output row per tariff data row: **origin** block, optional **flat-zero** block, then **return**.
 
     Flat-zero rows use the flat-zero pattern dict; tariff **Flat** bands → ``0``; **p/unit** (and
     p/X unit) copy from the **zero-base** table (same row index as origin or return data rows).
+
+    City-key frozensets come from :func:`_city_keys_declared_in_rate_card` on the extracted pattern
+    (before enrichment); ``None`` restores legacy fill behaviour for cities.
     """
     rows_out: list[dict] = []
     out_keys = _all_pattern_output_keys(pattern_key_order)
+    # Tariff lane columns must not overwrite pattern columns when headers match the same display name
+    # (e.g. return table "Destination Postal Code" zone 01–31 vs rate card hub 22113).
+    pattern_column_names = frozenset(out_keys)
 
     if _DEBUG:
         _debug_step(10, "Matrix: ORIGIN table → pattern fill")
@@ -2186,8 +2343,11 @@ def _build_matrix_rows(
         )
 
     zip_skip_o = _zip_lane_column_keys(col_labels_o)
-    expanded_o = _expand_pattern_for_fill(
-        origin_pattern, pattern_key_order, changing_keys=changing_keys
+    expanded_o = _strip_undeclared_city_keys(
+        _expand_pattern_for_fill(
+            origin_pattern, pattern_key_order, changing_keys=changing_keys
+        ),
+        origin_city_keys_from_rate_card,
     )
     if _DEBUG:
         _debug_line(f"expanded_o (pattern + empty fill slots): {expanded_o}", 0)
@@ -2199,7 +2359,12 @@ def _build_matrix_rows(
         if _DEBUG and i < 3:
             _debug_line(f"--- Origin data row {i + 1} / {len(data_rows_o)} ---", 1)
         filled = _fill_pattern_gaps(
-            expanded_o, dr, col_labels_o, lane_role="origin", changing_keys=changing_keys
+            expanded_o,
+            dr,
+            col_labels_o,
+            lane_role="origin",
+            changing_keys=changing_keys,
+            city_keys_from_rate_card=origin_city_keys_from_rate_card,
         )
         if _DEBUG and i < 3:
             _debug_line(
@@ -2214,6 +2379,8 @@ def _build_matrix_rows(
             if ck in zip_skip_o:
                 continue
             label = col_labels_o.get(ck, ck)
+            if label in pattern_column_names:
+                continue
             merged[label] = dr.get(ck)
         merged["_pattern_role"] = "origin"
         merged["_pattern_index"] = origin_pattern_idx
@@ -2248,8 +2415,11 @@ def _build_matrix_rows(
                 )
             measure_by_z = extract_rate_measure_labels_by_display_name(base_tb)
             zip_skip_z = _zip_lane_column_keys(col_labels_z)
-            expanded_z = _expand_pattern_for_fill(
-                flat_zero_pattern, pattern_key_order, changing_keys=changing_keys
+            expanded_z = _strip_undeclared_city_keys(
+                _expand_pattern_for_fill(
+                    flat_zero_pattern, pattern_key_order, changing_keys=changing_keys
+                ),
+                flat_zero_city_keys_from_rate_card,
             )
             lane_z = "origin" if flat_zero_base == "origin" else "return"
             for i, dr in enumerate(data_rows_z):
@@ -2257,7 +2427,12 @@ def _build_matrix_rows(
                 if _DEBUG and i < 3:
                     _debug_line(f"--- Flat-zero data row {i + 1} / {len(data_rows_z)} ---", 1)
                 filled = _fill_pattern_gaps(
-                    expanded_z, dr, col_labels_z, lane_role=lane_z, changing_keys=changing_keys
+                    expanded_z,
+                    dr,
+                    col_labels_z,
+                    lane_role=lane_z,
+                    changing_keys=changing_keys,
+                    city_keys_from_rate_card=flat_zero_city_keys_from_rate_card,
                 )
                 for pk in out_keys:
                     merged[pk] = str(filled.get(pk, "") or "")
@@ -2265,6 +2440,8 @@ def _build_matrix_rows(
                     if ck in zip_skip_z:
                         continue
                     label = col_labels_z.get(ck, ck)
+                    if label in pattern_column_names:
+                        continue
                     if _label_is_flat_zero_tariff_band(label, measure_by_z):
                         merged[label] = 0
                     else:
@@ -2296,8 +2473,11 @@ def _build_matrix_rows(
                 0,
             )
         zip_skip_r = _zip_lane_column_keys(col_labels_r)
-        expanded_r = _expand_pattern_for_fill(
-            return_pattern, pattern_key_order, changing_keys=changing_keys
+        expanded_r = _strip_undeclared_city_keys(
+            _expand_pattern_for_fill(
+                return_pattern, pattern_key_order, changing_keys=changing_keys
+            ),
+            return_city_keys_from_rate_card,
         )
         if _DEBUG:
             _debug_line(f"expanded_r: {expanded_r}", 0)
@@ -2308,7 +2488,12 @@ def _build_matrix_rows(
             if _DEBUG and i < 3:
                 _debug_line(f"--- Return data row {i + 1} / {len(data_rows_r)} ---", 1)
             filled = _fill_pattern_gaps(
-                expanded_r, dr, col_labels_r, lane_role="return", changing_keys=changing_keys
+                expanded_r,
+                dr,
+                col_labels_r,
+                lane_role="return",
+                changing_keys=changing_keys,
+                city_keys_from_rate_card=return_city_keys_from_rate_card,
             )
             if _DEBUG and i < 3:
                 _debug_line(
@@ -2323,6 +2508,8 @@ def _build_matrix_rows(
                 if ck in zip_skip_r:
                     continue
                 label = col_labels_r.get(ck, ck)
+                if label in pattern_column_names:
+                    continue
                 merged[label] = dr.get(ck)
             merged["_pattern_role"] = "return"
             merged["_pattern_index"] = return_pattern_idx
@@ -2339,13 +2526,18 @@ def _build_matrix_rows_multi(
     pattern_table_indices: list[int],
     tables: list[list[dict]],
     changing_keys: list[str] | None = None,
+    pattern_city_keys_from_rate_card: list[frozenset[str]] | None = None,
 ) -> list[dict]:
     """
     One matrix section per rate-card pattern, each using its assigned tariff table block.
     Row metadata includes ``_tariff_table_block`` (1-based, same numbering as prompts).
+
+    *pattern_city_keys_from_rate_card* has one frozenset per pattern (from
+    :func:`_city_keys_declared_in_rate_card` on the extracted pattern before enrichment).
     """
     rows_out: list[dict] = []
     out_keys = _all_pattern_output_keys(pattern_key_order)
+    pattern_column_names = frozenset(out_keys)
     if len(pattern_table_indices) != len(patterns):
         raise ValueError("pattern_table_indices and patterns length mismatch")
 
@@ -2380,15 +2572,29 @@ def _build_matrix_rows_multi(
                 0,
             )
 
+        city_keys_card = (
+            pattern_city_keys_from_rate_card[pi]
+            if pattern_city_keys_from_rate_card is not None
+            and pi < len(pattern_city_keys_from_rate_card)
+            else None
+        )
         zip_skip = _zip_lane_column_keys(col_labels)
-        expanded = _expand_pattern_for_fill(pat, pattern_key_order, changing_keys=changing_keys)
+        expanded = _strip_undeclared_city_keys(
+            _expand_pattern_for_fill(pat, pattern_key_order, changing_keys=changing_keys),
+            city_keys_card,
+        )
 
         for i, dr in enumerate(data_rows):
             merged: dict[str, str | int | float | None] = {}
             if _DEBUG and i < 2:
                 _debug_line(f"  Pattern {pi + 1} data row {i + 1}/{len(data_rows)}", 1)
             filled = _fill_pattern_gaps(
-                expanded, dr, col_labels, lane_role=lane_role, changing_keys=changing_keys
+                expanded,
+                dr,
+                col_labels,
+                lane_role=lane_role,
+                changing_keys=changing_keys,
+                city_keys_from_rate_card=city_keys_card,
             )
             for pk in out_keys:
                 merged[pk] = str(filled.get(pk, "") or "")
@@ -2396,6 +2602,8 @@ def _build_matrix_rows_multi(
                 if ck in zip_skip:
                     continue
                 label = col_labels.get(ck, ck)
+                if label in pattern_column_names:
+                    continue
                 merged[label] = dr.get(ck)
             merged["_pattern_role"] = role if role == "return" else "origin"
             merged["_pattern_index"] = pi
@@ -2623,8 +2831,10 @@ def main():
     use_per_pattern_tables = len(patterns) > 3 and len(pairs) >= 2
     pattern_table_indices: list[int] | None = None
     enriched_all_patterns: list[dict] | None = None
+    per_pattern_city_keys_from_card: list[frozenset[str]] | None = None
 
     if use_per_pattern_tables:
+        per_pattern_city_keys_from_card = [_city_keys_declared_in_rate_card(p) for p in patterns]
         pattern_table_indices = _prompt_pattern_to_tariff_table_indices(patterns, tables)
         enriched_all_patterns = [
             _enrich_pattern_from_rates_table(p, rates_table, stable_keys) for p in patterns
@@ -2733,6 +2943,13 @@ def main():
         )
 
     if not use_per_pattern_tables:
+        origin_city_keys_card = _city_keys_declared_in_rate_card(origin_pat)
+        return_city_keys_card = (
+            _city_keys_declared_in_rate_card(return_pat) if return_pat is not None else frozenset()
+        )
+        flat_zero_city_keys_card = (
+            _city_keys_declared_in_rate_card(flat_zero_pat) if flat_zero_pat is not None else frozenset()
+        )
         origin_pat = _enrich_pattern_from_rates_table(origin_pat, rates_table, stable_keys)
         if flat_zero_pat is not None:
             flat_zero_pat = _enrich_pattern_from_rates_table(flat_zero_pat, rates_table, stable_keys)
@@ -2797,6 +3014,7 @@ def main():
             pattern_table_indices=pattern_table_indices,
             tables=tables,
             changing_keys=changing_fill_keys,
+            pattern_city_keys_from_rate_card=per_pattern_city_keys_from_card,
         )
     else:
         matrix_rows = _build_matrix_rows(
@@ -2811,6 +3029,9 @@ def main():
             flat_zero_pattern=flat_zero_pat,
             flat_zero_pattern_idx=flat_zero_idx,
             flat_zero_base=flat_zero_base,
+            origin_city_keys_from_rate_card=origin_city_keys_card,
+            return_city_keys_from_rate_card=return_city_keys_card,
+            flat_zero_city_keys_from_rate_card=flat_zero_city_keys_card,
         )
     if _DEBUG and rate_card_costs:
         print(
@@ -2820,8 +3041,7 @@ def main():
     if _DEBUG and matrix_rows:
         _debug_step(7, "DataFrame column order (why you might not 'see' a pattern column)")
         _debug_line(
-            "Pattern fields are the first columns: see _all_pattern_output_keys order + _pattern_role, "
-            "_pattern_number.",
+            "Shipment columns follow the previous rate card rates_table column order (no _pattern_* in export).",
             0,
         )
         _debug_line(f"First row keys (sample): {list(matrix_rows[0].keys())[:25]}", 0)
@@ -2845,8 +3065,9 @@ def main():
                 print(f"      First row keys sample: {list(tb[0].keys())[:8]} primary_col={k!r}")
         return
 
-    # Column order: pattern keys, pattern meta, then tariff bands (cost metadata is separate, not columns)
-    reserved = {"_pattern_index", "_pattern_role", "_pattern_number", "_tariff_table_block"}
+    # Column order: rate-card lane columns (order + presence), tariff lane_misc, then rate bands.
+    # Internal keys (_pattern_*, _tariff_table_block) are omitted from Excel/JSON output.
+    reserved = _EXCEL_OUTPUT_INTERNAL_DROP
     pattern_cols = set(_all_pattern_output_keys(key_order))
     extra_cols = []
     for r in matrix_rows:
@@ -2855,15 +3076,13 @@ def main():
                 if k not in extra_cols:
                     extra_cols.append(k)
     extra_cols = sort_extra_tariff_columns(extra_cols)
-    lane_misc, rate_block_cols = build_rate_block_column_order(extra_cols)
-    ordered = (
-        _all_pattern_output_keys(key_order)
-        + ["_pattern_role", "_pattern_number", "_pattern_index", "_tariff_table_block"]
-        + lane_misc
-        + rate_block_cols
-    )
+    _, rate_block_cols = build_rate_block_column_order(extra_cols)
 
     df = pd.DataFrame(matrix_rows)
+    df = _apply_chosen_tariff_sheet_to_matrix(df, rates_table, pairs)
+    shipment_prefix = _excel_shipment_column_prefix(df, rates_table, key_order)
+    # Tariff-only lane columns (Zip 2, ColumnN, …) are omitted — export matches previous rate card + rate bands.
+    ordered = shipment_prefix + rate_block_cols
     df = df.reindex(columns=[c for c in ordered if c in df.columns] + [c for c in df.columns if c not in ordered])
     _n_before = len(df.columns)
     df = drop_all_empty_columns(df)
@@ -2873,12 +3092,8 @@ def main():
 
     rate_block_cols = [c for c in rate_block_cols if c in df.columns]
     df, rate_block_cols = normalize_currency_column_and_strip_band_amounts(df, rate_block_cols)
-    ordered = (
-        _all_pattern_output_keys(key_order)
-        + ["_pattern_role", "_pattern_number", "_pattern_index", "_tariff_table_block"]
-        + lane_misc
-        + rate_block_cols
-    )
+    shipment_prefix = _excel_shipment_column_prefix(df, rates_table, key_order)
+    ordered = shipment_prefix + rate_block_cols
     df = df.reindex(columns=[c for c in ordered if c in df.columns] + [c for c in df.columns if c not in ordered])
     _curr_keep = frozenset(c for c in df.columns if _is_currency_column_name(str(c)))
     df = drop_all_empty_columns(df, keep_columns=_curr_keep if _curr_keep else None)
@@ -2904,12 +3119,8 @@ def main():
             rate_column_measures,
             fill_synthetic_from_ftl=fill_from_ftl,
         )
-    ordered = (
-        _all_pattern_output_keys(key_order)
-        + ["_pattern_role", "_pattern_number", "_pattern_index", "_tariff_table_block"]
-        + lane_misc
-        + rate_block_cols
-    )
+    shipment_prefix = _excel_shipment_column_prefix(df, rates_table, key_order)
+    ordered = shipment_prefix + rate_block_cols
     df = df.reindex(columns=[c for c in ordered if c in df.columns] + [c for c in df.columns if c not in ordered])
 
     shipment_cols = [c for c in ordered if c in df.columns and c not in rate_block_cols]
