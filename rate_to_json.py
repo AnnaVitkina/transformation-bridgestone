@@ -104,6 +104,7 @@ def format_cell_display(cell):
     """
     Return the value as Excel would display it (formatted), not the raw value.
     E.g. 6.769... with format '0.000 "€"' -> "6.769 €"; with '0.00 "PLN"' -> "6.77 PLN"
+    Whole numbers with no currency suffix use integer text (``"1"``) so zones/postals are not ``"1.00"``.
     Always returns JSON-serializable types (str, int, float, None).
     """
     value = cell.value
@@ -111,12 +112,21 @@ def format_cell_display(cell):
         return None
     nf = (cell.number_format or "General").strip()
     if isinstance(value, (int, float)):
+        suffix = get_currency_suffix(nf) or (DEFAULT_CURRENCY if DEFAULT_CURRENCY else "")
+        if not suffix:
+            if isinstance(value, int):
+                return str(value)
+            if (
+                isinstance(value, float)
+                and math.isfinite(value)
+                and value == int(value)
+            ):
+                return str(int(value))
         decimals = get_decimal_places(nf)
         try:
             formatted = f"{value:.{decimals}f}"
         except (ValueError, TypeError):
             return value
-        suffix = get_currency_suffix(nf) or (DEFAULT_CURRENCY if DEFAULT_CURRENCY else "")
         if suffix:
             formatted = f"{formatted}{suffix}"
         return formatted
