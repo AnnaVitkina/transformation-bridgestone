@@ -90,7 +90,11 @@ def _prompt_add_synthetic_geq_columns() -> bool:
         print("[rate_creation] RATE_ADD_SYNTHETIC_GEQ=no — skipping extra '>=' FLAT columns.\n")
         return False
     try:
-        q = input("Add extra manually calculated FLAT columns [Y/n]: ").strip().lower()
+        print(
+            "For some Rate Agreements it is mandatory to add the last manually created column (it is FLAT).\n"
+            "Please choose if it should be added. Enter \"y\" is YES, \"n\" is NO."
+        )
+        q = input("Your choice: ").strip().lower()
     except EOFError:
         print("  (EOF — default: yes)\n")
         return True
@@ -115,9 +119,9 @@ def _prompt_synthetic_geq_fill_mode() -> str:
         return "calculation"
     try:
         print(
-            "This tariff has an FTL column. How should the new synthetic '>=' FLAT cells be filled?\n"
-            "  [1] Calculation — multiply rates by weight limits (same rules as other bands)\n"
-            "  [2] FTL         — copy the FTL cell value on each row\n"
+            "This tariff has an FTL column. How should the new manual  '>=' FLAT cells be filled?\n"
+            "  [1] Calculation — the column is added by calculation (multiplying the weight bracket to the cost)\n"
+            "  [2] FTL         — copied costs from the FTL column\n"
         )
         q = input("Choose 1 or 2 (default 1): ").strip().lower()
     except EOFError:
@@ -1782,9 +1786,9 @@ def _summarize_table_block_line(table_index_1based: int, tb: list[dict]) -> str:
     if not blob_display.strip():
         blob_display = "(no recognised title row — preamble or unnamed block)"
     if _title_indicates_return_lane(blob_raw):
-        lane_guess = "return lane (title mentions return)"
+        lane_guess = "return lane"
     else:
-        lane_guess = "outbound / standard (title does not indicate return)"
+        lane_guess = "outbound / standard"
     peek = ""
     if tb[0]:
         sample_vals = [
@@ -1822,24 +1826,21 @@ def _prompt_pattern_to_tariff_table_indices(patterns: list[dict], tables: list[l
         return []
     _ui_heading("Step 3 — Link each rate-card pattern to a tariff table")
     print(
-        "Below are the tariff table blocks found after merging your workbook(s).\n"
-        "For each lane pattern from the rate card, type which table number (1 to N) supplies its rates.\n"
-        "Whether a row is treated as outbound or return for city/zip filling follows the Service field "
-        '(e.g. names containing "RETURN" use the return-lane rules).\n'
+        "Below are the Rate Card tables, extracted from the provided Rate Card "
+        "and the shipment patterns, recognized from the Rate Agreement.\n"
     )
-    print("Tariff table blocks:")
+    print("Rate Card tables:")
     for ti, tb in enumerate(tables, 1):
         print(_summarize_table_block_line(ti, tb))
     out: list[int] = []
     for pi, p in enumerate(patterns):
         role = _infer_pattern_lane_role(p)
         print(f"\n  Pattern {pi + 1} of {len(patterns)} — lane type: {role}")
-        print(f"      Summary: {_format_pattern_one_line_summary(p)}")
         print("      Fields from rate card:")
         print(_format_pattern_detail_block(p, indent="        "))
         while True:
             raw = input(
-                f"\n  Which table number for pattern {pi + 1}? (1–{len(tables)}): "
+                f"\n  Choose which table from the Rate Card corresponds the Rate Agreement pattern (1–{len(tables)}): "
             ).strip()
             try:
                 tn = int(raw)
@@ -2661,8 +2662,11 @@ def main():
         return
     _ui_heading("Step 1 — Rate Card(s) from the 'input' folder")
     print(
-        "These are the same Excel files that rate_to_json.py reads.\n"
-        "You can pick one file, or merge several.\n"
+        "Please choose the Rate Card you want to process.\n"
+        "Note, that the Rate Card should correspond the Rate Agreement "
+        "(choose only those Rate Cards that should be used for the RA update).\n"
+        "If you need to use more than 1 rate card for the update, "
+        "please enter their numbers by comma (,)\n"
     )
     print("Files:")
     for i, name in enumerate(files, 1):
@@ -2684,7 +2688,7 @@ def main():
             print(f"  {i}. {name}")
         try:
             tab_idx = int(
-                input(f"Which sheet number for this file? (1–{len(wb.sheetnames)}): ").strip()
+                input(f"Choose the sheet number to process. (1–{len(wb.sheetnames)}): ").strip()
             )
             sheet_name = wb.sheetnames[tab_idx - 1]
         except (ValueError, IndexError):
@@ -2764,7 +2768,7 @@ def main():
         return
     _ui_heading("Step 2 — Example Rate Agreements")
     print(
-        "Pick one workbook from the 'previous rate' folder. Its lanes and patterns drive the matrix columns.\n"
+        "Please choose the previous Rate Agreement used for the update.\n"
     )
     print("Files:")
     for i, f in enumerate(prev_files, 1):
@@ -2860,7 +2864,11 @@ def main():
         _ui_heading("Step 3 — Outbound vs return pattern")
         _print_pattern_catalog(
             patterns,
-            intro="Define the initial pattern and return pattern.",
+            intro=(
+                "Below are defined patters present in the Rate Agreement "
+                "(pre-defined and not present in Rate Card).\n"
+                "Please define. which patters is for Standard shipment and which one is for Return"
+            ),
         )
         while True:
             raw = input("\nInitial pattern number — 1 or 2: ").strip()
@@ -2882,12 +2890,15 @@ def main():
         _ui_heading("Step 3 — Outbound, flat-zero, and return")
         _print_pattern_catalog(
             patterns,
-            intro="Three patterns were found. Assign each role once: outbound (origin), flat-zero, and return.\n"
-            "Use three different numbers from 1 to 3.",
+            intro=(
+                "Three patterns of the shipment details were recognized in the Rate Agreement. "
+                "Define which pattern is corresponding to which rates flow: standard, return "
+                "and the one with zero-rates."
+            ),
         )
         while True:
             try:
-                o = int(input("\nOutbound (origin) pattern number (1–3): ").strip())
+                o = int(input("\nStandard pattern number (1–3): ").strip())
                 fz = int(input("Flat-zero pattern number (1–3): ").strip())
                 r = int(input("Return pattern number (1–3): ").strip())
                 if len({o, fz, r}) == 3 and all(1 <= x <= 3 for x in (o, fz, r)):
@@ -2907,8 +2918,8 @@ def main():
         )
         while True:
             raw = input(
-                "\nFor flat-zero rows, copy per-kg (p/unit) amounts from which tariff table? "
-                "Type 'origin' for outbound or 'return' for return: "
+                "\nFor flat-zero rows, copy per-kg (p/unit) amounts from which Rate Card table? "
+                "Type 'origin' for Standard or 'return' for Return: "
             ).strip().lower()
             if raw in ("origin", "o", "1"):
                 flat_zero_base = "origin"
