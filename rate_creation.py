@@ -2871,7 +2871,7 @@ def main():
             ),
         )
         while True:
-            raw = input("\nInitial pattern number — 1 or 2: ").strip()
+            raw = input("\nStandard pattern number — 1 or 2: ").strip()
             try:
                 choice = int(raw)
                 if choice in (1, 2):
@@ -2884,7 +2884,7 @@ def main():
         origin_pat = patterns[origin_idx]
         return_pat = patterns[return_idx]
         print(
-            f"\n  Confirmed: initial = pattern {origin_idx + 1}, return = pattern {return_idx + 1}."
+            f"\n  Confirmed: standard = pattern {origin_idx + 1}, return = pattern {return_idx + 1}."
         )
     elif len(patterns) == 3:
         _ui_heading("Step 3 — Outbound, flat-zero, and return")
