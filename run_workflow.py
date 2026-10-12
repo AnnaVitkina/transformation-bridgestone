@@ -1,11 +1,20 @@
 """
-Google Colab / Drive workflow entrypoint.
+Workflow entrypoint for Google Colab / Drive and for a local machine.
 
 Why ``ModuleNotFoundError: rate_to_json``: with ``exec(open(...).read())``, Python does not add
 the repo folder to ``sys.path``. This script prepends it automatically; if the repo is not at
 ``/content/transformation-bridgestone``, set ``TRANSFORMATION_BRIDGESTONE_REPO`` before running.
 
-Usage (after mounting Drive and cloning the repo under /content/transformation-bridgestone):
+Local usage (from this repo, after ``pip install openpyxl pandas``):
+
+  python run_workflow.py
+  python run_workflow.py --root /path/to/RMT_Bridgestone
+
+On a local machine the data root defaults to this repo folder (``input/``, ``output/``,
+``previous_rate/`` or ``previous rate/``, ``processing/``, ``archive/``). Override with
+``--root`` or ``RMT_BRIDGESTONE_ROOT``.
+
+Colab usage (after mounting Drive and cloning the repo under /content/transformation-bridgestone):
 
   import os
   os.chdir("/content/transformation-bridgestone")
@@ -16,45 +25,49 @@ Usage (after mounting Drive and cloning the repo under /content/transformation-b
   )
   # Or: ``from run_workflow import main; main()``
 
-Or with explicit root (defaults to the shared Drive path below):
+Or with explicit root (Colab defaults to the shared Drive path if that folder exists):
 
   os.environ["RMT_BRIDGESTONE_ROOT"] = "/path/to/RMT_Bridgestone"
   from run_workflow import main as _run_workflow
   _run_workflow()
 
 Steps:
-  1) Point rate_to_json, rate_card_extraction, and rate_creation at Drive folders.
+  1) Point rate_to_json, rate_card_extraction, and rate_creation at the data folders.
   2) Run rate_creation.main() (interactive prompts).
   3) Rename *_rate_matrix.xlsx / .json to match the previous-rate workbook stem with v.N bumped (v.1 -> v.2, etc.).
   4) Move processed tariff xlsx files from input/ to archive/.
 
-Data layout (override with RMT_BRIDGESTONE_ROOT):
+Data layout (override with RMT_BRIDGESTONE_ROOT or --root):
   .../input
   .../output
-  .../previous_rate
+  .../previous_rate   (``previous rate`` is also accepted if that folder already exists)
   .../processing
-  .../archive   (folder name as on your Drive)
+  .../archive
 """
 
 from __future__ import annotations
 
+import argparse
 import os
 import sys
 from pathlib import Path
 
 
-def _ensure_repo_on_sys_path() -> None:
-    """Colab ``exec(open(...).read())`` does not put the repo on ``sys.path``; sibling imports fail."""
+def _repo_dir() -> Path:
     try:
-        root = Path(__file__).resolve().parent
+        return Path(__file__).resolve().parent
     except NameError:
-        root = Path(
+        return Path(
             os.environ.get(
                 "TRANSFORMATION_BRIDGESTONE_REPO",
                 "/content/transformation-bridgestone",
             )
         ).resolve()
-    s = str(root)
+
+
+def _ensure_repo_on_sys_path() -> None:
+    """Colab ``exec(open(...).read())`` does not put the repo on ``sys.path``; sibling imports fail."""
+    s = str(_repo_dir())
     if s not in sys.path:
         sys.path.insert(0, s)
 
@@ -66,20 +79,40 @@ import re
 import shutil
 from datetime import datetime
 
-DEFAULT_ROOT = (
+COLAB_DEFAULT_ROOT = (
     "/content/drive/Shareddrives/FA Ops Europe: Rate Maintenance Team "
     "/Documents/AI Adoption RMT/RMT_Bridgestone/Fiege"
 )
+DEFAULT_ROOT = COLAB_DEFAULT_ROOT
 
 
-def _resolve_root() -> Path:
-    return Path(os.environ.get("RMT_BRIDGESTONE_ROOT", DEFAULT_ROOT)).expanduser().resolve()
+def _resolve_root(cli_root: str | None = None) -> Path:
+    if cli_root:
+        return Path(cli_root).expanduser().resolve()
+    env = os.environ.get("RMT_BRIDGESTONE_ROOT", "").strip()
+    if env:
+        return Path(env).expanduser().resolve()
+    colab = Path(COLAB_DEFAULT_ROOT)
+    if colab.is_dir():
+        return colab.resolve()
+    return _repo_dir()
+
+
+def _previous_rate_dir(root: Path) -> Path:
+    """Prefer ``previous_rate``; reuse an existing ``previous rate`` folder (local scripts)."""
+    underscore = root / "previous_rate"
+    spaced = root / "previous rate"
+    if underscore.is_dir():
+        return underscore
+    if spaced.is_dir():
+        return spaced
+    return underscore
 
 
 def _apply_data_paths(root: Path) -> None:
     root = root.resolve()
     inp = root / "input"
-    prev = root / "previous_rate"
+    prev = _previous_rate_dir(root)
     out = root / "output"
     proc = root / "processing"
     import rate_to_json as rt
@@ -165,10 +198,26 @@ def post_process_after_rate_creation(root: Path) -> None:
         print(f"Archived: {src.name} -> {dest}")
 
 
-def main() -> None:
-    root = _resolve_root()
-    for sub in ("input", "output", "previous_rate", "processing", "archive"):
-        (root / sub).mkdir(parents=True, exist_ok=True)
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(
+        description="Run the Bridgestone rate-matrix workflow (local or Colab)."
+    )
+    parser.add_argument(
+        "--root",
+        default=None,
+        help=(
+            "Data folder containing input/, previous_rate/, output/, processing/, archive/. "
+            "Defaults to RMT_BRIDGESTONE_ROOT, then the Colab Drive path if it exists, "
+            "otherwise this repo directory."
+        ),
+    )
+    args, _unknown = parser.parse_known_args(argv)
+
+    root = _resolve_root(args.root)
+    print(f"Data root: {root}")
+    prev = _previous_rate_dir(root)
+    for folder in (root / "input", root / "output", prev, root / "processing", root / "archive"):
+        folder.mkdir(parents=True, exist_ok=True)
 
     _apply_data_paths(root)
 
