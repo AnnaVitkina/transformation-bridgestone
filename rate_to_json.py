@@ -41,6 +41,14 @@ _TABLE_TITLE_PATTERNS = (
 )
 _MONTHS = ("January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December")
 
+# Filename token, e.g. ``… September 2026 RDE2 Lahr DE …`` → ``RDE2``.
+_RDE_FROM_NAME_RE = re.compile(r"(?i)\bRDE(\d+)\b")
+# Side-by-side title cells that may omit ``RDE`` (``Rates September 2026``).
+_LOOSE_RATES_TITLE_RE = re.compile(r"(?i)^(return\s+|rerurn\s+)?rates\b")
+_RATES_TITLE_REST_RE = re.compile(
+    r"(?i)^(return\s+|rerurn\s+)?rates\s+(?:RDE\d+\s*)?"
+)
+
 
 def get_decimal_places(number_format):
     """Infer decimal places from Excel number format (e.g. 0.000 -> 3, 0,00 -> 2)."""
@@ -340,6 +348,68 @@ def _cells_matching_table_title_patterns(row: dict) -> list[tuple[str, str]]:
     return out
 
 
+def extract_rde_from_name(name: str | None) -> str | None:
+    """
+    Return ``RDEn`` from a tariff file stem/name, e.g.
+    ``Bridgestone … September 2026 RDE2 Lahr DE …`` → ``RDE2``.
+    """
+    if not name:
+        return None
+    m = _RDE_FROM_NAME_RE.search(str(name))
+    if not m:
+        return None
+    return f"RDE{m.group(1)}"
+
+
+def _cells_matching_loose_rates_titles(row: dict) -> list[tuple[str, str]]:
+    """
+    Side-by-side title cells starting with ``Rates`` / ``Return Rates`` even when ``RDE``
+    is missing (``Rates September 2026``). Skips tier labels like ``Rates Per Shipment``.
+    """
+    out: list[tuple[str, str]] = []
+    for ck in sorted(row.keys(), key=_column_key_sort):
+        v = row.get(ck)
+        if v is None or not str(v).strip():
+            continue
+        s = str(v).strip()
+        if len(s) < 15:
+            continue
+        if not _LOOSE_RATES_TITLE_RE.match(s):
+            continue
+        if re.search(r"(?i)\bper\s+(shipment|kg)\b", s):
+            continue
+        out.append((ck, s))
+    return out
+
+
+def _rates_title_rest(title: str) -> str:
+    """Strip ``Rates`` / ``Return Rates`` / ``RDEn`` prefix; keep month/year text as-is."""
+    s = str(title).strip()
+    s = _RATES_TITLE_REST_RE.sub("", s).strip()
+    return s
+
+
+def _normalize_dual_titles_with_rde(left: str, right: str, rde: str) -> tuple[str, str]:
+    """
+    Rewrite a side-by-side dual title into outbound + return with filename ``RDEn``:
+
+    ``Rates RDE2 September 2026 | Rates September 2026``
+      → ``Rates RDE2 September 2026``, ``Return Rates RDE2 September 2026``
+
+    ``Rates September 2026 | Return Rates SEPTEMBER 2026``
+      → ``Rates RDE6 September 2026``, ``Return Rates RDE6 SEPTEMBER 2026``
+    """
+    rest_l = _rates_title_rest(left)
+    rest_r = _rates_title_rest(right)
+    if not rest_l and rest_r:
+        rest_l = rest_r
+    if not rest_r and rest_l:
+        rest_r = rest_l
+    left_out = f"Rates {rde} {rest_l}".strip()
+    right_out = f"Return Rates {rde} {rest_r}".strip()
+    return left_out, right_out
+
+
 def _find_wide_matrix_header_row_index(rows: list[dict], dual_idx: int, *, max_scan: int = 8) -> int | None:
     """
     Row index of the first wide header that has two lane starts (second Zip 2 / Currency /
@@ -394,7 +464,11 @@ def _project_row_reindex_columns(row: dict, column_keys: list[str]) -> dict:
     return out
 
 
-def _expand_dual_title_row_side_by_side(rows: list[dict]) -> list[dict]:
+def _expand_dual_title_row_side_by_side(
+    rows: list[dict],
+    *,
+    file_stem: str | None = None,
+) -> list[dict]:
     """
     Some sheets put **two** table titles on **one** row (e.g. ``Rates RDE1…`` in Column1 and
     ``Return Rates RDE1…`` in Column28), with a wide header row below (two ``Destination Postal Code``
@@ -406,6 +480,12 @@ def _expand_dual_title_row_side_by_side(rows: list[dict]) -> list[dict]:
     starts) by scanning a few rows down — a **tier** row (Price per shipment / per kg) may sit
     between title and header. Then split into: left title + left columns for all following rows,
     then right title + right columns.
+
+    When the filename contains ``RDEn`` (e.g. ``… RDE2 Lahr …``), also accept side-by-side titles
+    that omit ``RDE`` (``Rates September 2026 | Return Rates SEPTEMBER 2026`` or
+    ``Rates RDE2 September 2026 | Rates September 2026``). Left becomes outbound
+    ``Rates RDEn …``; right becomes ``Return Rates RDEn …``. This rewrite applies only for that
+    dual-title pattern.
 
     Disable with ``RATE_DISABLE_DUAL_TITLE_SPLIT=1``.
     """
@@ -419,12 +499,23 @@ def _expand_dual_title_row_side_by_side(rows: list[dict]) -> list[dict]:
     ):
         return rows
 
+    rde = extract_rde_from_name(file_stem)
     dual_idx: int | None = None
+    title_pairs: list[tuple[str, str]] = []
     for i, row in enumerate(rows):
-        if len(_cells_matching_table_title_patterns(row)) >= 2:
+        strict = _cells_matching_table_title_patterns(row)
+        if len(strict) >= 2:
             dual_idx = i
+            title_pairs = strict
             break
-    if dual_idx is None or dual_idx + 1 >= len(rows):
+        # Filename RDE only: allow plain ``Rates …`` cells that omit ``RDE`` / ``Return``.
+        if rde:
+            loose = _cells_matching_loose_rates_titles(row)
+            if len(loose) >= 2:
+                dual_idx = i
+                title_pairs = loose
+                break
+    if dual_idx is None or dual_idx + 1 >= len(rows) or len(title_pairs) < 2:
         return rows
 
     hi = _find_wide_matrix_header_row_index(rows, dual_idx)
@@ -446,9 +537,12 @@ def _expand_dual_title_row_side_by_side(rows: list[dict]) -> list[dict]:
     if len(left_cks) < 2 or len(right_cks) < 2:
         return rows
 
-    title_pairs = _cells_matching_table_title_patterns(rows[dual_idx])
     title_left = title_pairs[0][1].strip()
     title_right = title_pairs[1][1].strip()
+    if rde:
+        title_left, title_right = _normalize_dual_titles_with_rde(
+            title_left, title_right, rde
+        )
 
     out: list[dict] = []
     out.extend(rows[:dual_idx])
@@ -463,7 +557,11 @@ def _expand_dual_title_row_side_by_side(rows: list[dict]) -> list[dict]:
     return out
 
 
-def _clean_data(data: list[dict]) -> list[dict]:
+def _clean_data(
+    data: list[dict],
+    *,
+    file_stem: str | None = None,
+) -> list[dict]:
     """Remove all-null rows, all-null columns, and omit null values from each object. Optionally strip metadata rows."""
     if not data:
         return data
@@ -492,16 +590,23 @@ def _clean_data(data: list[dict]) -> list[dict]:
         obj = {k: v for k, v in row.items() if k in keep_keys and not _is_empty_value(v)}
         if obj:
             cleaned.append(obj)
-    cleaned = _expand_dual_title_row_side_by_side(cleaned)
+    cleaned = _expand_dual_title_row_side_by_side(cleaned, file_stem=file_stem)
     return cleaned
 
 
-def clean_tariff_rows_twice(data: list[dict]) -> list[dict]:
+def clean_tariff_rows_twice(
+    data: list[dict],
+    *,
+    file_stem: str | None = None,
+) -> list[dict]:
     """
     Apply :func:`_clean_data` twice — same net effect as exporting with ``main()`` (one pass) and
     then running ``clean_rate_json.py`` on the file (second pass).
+
+    ``file_stem`` (optional): tariff workbook stem so dual side-by-side titles can inherit ``RDEn``.
     """
-    return _clean_data(_clean_data(data))
+    once = _clean_data(data, file_stem=file_stem)
+    return _clean_data(once, file_stem=file_stem)
 
 
 def export_tariff_sheet_rows(path: Path, sheet_name: str) -> list[dict]:
@@ -514,7 +619,7 @@ def export_tariff_sheet_rows(path: Path, sheet_name: str) -> list[dict]:
     ws = wb[sheet_name]
     data = sheet_to_json(ws)
     data = _extract_tables_by_name(data, path.stem, sheet_name)
-    return clean_tariff_rows_twice(data)
+    return clean_tariff_rows_twice(data, file_stem=path.stem)
 
 
 def combine_tariff_sheet_rows(file_sheet_pairs: list[tuple[Path, str]]) -> list[dict]:
