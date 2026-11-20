@@ -685,6 +685,33 @@ def parse_tariff_file_index_list(choice: str, n_files: int) -> list[int]:
     return out
 
 
+def _is_incomplete_new_freight_title(title: str) -> bool:
+    """
+    True for stub labels like ``New Freight Rate `` / ``New Freight Rate Returns `` that
+    lack month, year, quarter, RDEn, or RCZn. Those rows must not start a new table block
+    (they sit under a full title and would steal the rate body).
+    """
+    s = str(title).strip()
+    if not re.search(r"(?i)new\s+freight\s+rate", s):
+        return False
+    rest = re.sub(
+        r"(?i)new\s+freight\s+rate\s*(returns?|rerurn)?",
+        "",
+        s,
+    ).strip(" \t-–—/|")
+    if not rest:
+        return True
+    if re.search(
+        r"(?i)\b("
+        r"January|February|March|April|May|June|July|August|September|October|November|December"
+        r"|Q\d|RDE\d+|RCZ\d+|\d{4}"
+        r")\b",
+        rest,
+    ):
+        return False
+    return True
+
+
 def _get_table_title_from_row(row: dict) -> str | None:
     """If row looks like a table title row, return the title string; else None."""
     candidates = [str(v).strip() for v in row.values() if v is not None and str(v).strip()]
@@ -695,8 +722,54 @@ def _get_table_title_from_row(row: dict) -> str | None:
             continue
         for pat in _TABLE_TITLE_PATTERNS:
             if pat in s:
+                if _is_incomplete_new_freight_title(s):
+                    break
                 return s
     return None
+
+
+def _table_block_has_body(block: list[dict]) -> bool:
+    """True if the block has any non-title row after the first (header / rates / tier)."""
+    if not block or len(block) < 2:
+        return False
+    for row in block[1:]:
+        if _get_table_title_from_row(row):
+            continue
+        if row:
+            return True
+    return False
+
+
+def _merge_title_only_table_blocks(tables: list[list[dict]]) -> list[list[dict]]:
+    """
+    If a block is only a real title (no body) and the next block has the rates, merge them.
+    Keeps the full title from the empty block; drops the next block's leading title row.
+    Handles sheets where ``New Freight Rate Returns November…`` is immediately followed by a
+    stub ``New Freight Rate Returns `` row that previously owned the Zip 2 body.
+    """
+    if len(tables) < 2:
+        return tables
+    out: list[list[dict]] = []
+    i = 0
+    while i < len(tables):
+        block = tables[i]
+        if (
+            block
+            and _get_table_title_from_row(block[0])
+            and not _table_block_has_body(block)
+            and i + 1 < len(tables)
+            and tables[i + 1]
+        ):
+            nxt = tables[i + 1]
+            merged = [block[0]]
+            start = 1 if _get_table_title_from_row(nxt[0]) else 0
+            merged.extend(nxt[start:])
+            out.append(merged)
+            i += 2
+            continue
+        out.append(block)
+        i += 1
+    return out
 
 
 def _split_into_tables(rows: list[dict]) -> list[list[dict]]:
@@ -713,7 +786,7 @@ def _split_into_tables(rows: list[dict]) -> list[list[dict]]:
             current.append(row)
     if current:
         tables.append(current)
-    return tables
+    return _merge_title_only_table_blocks(tables)
 
 
 def _extract_keywords_from_name(file_stem: str, sheet_name: str) -> list[str]:

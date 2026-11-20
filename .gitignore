@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+input/
+output/
+processing/
+archive/
+previous_rate/
+previous rate/
+*.xlsx
